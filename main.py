@@ -9,7 +9,7 @@ import sys
 # 패키지 자동 설치
 def install_requirements():
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        subprocess.check_call(["pip", "install", "-r", "requirements.txt"])
     except subprocess.CalledProcessError as e:
         print(f"패키지 설치 중 오류 발생: {e}")
         sys.exit(1)
