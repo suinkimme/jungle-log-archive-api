@@ -19,7 +19,7 @@ if os.path.exists("requirements.txt"):
     install_requirements()
 
 # 외부
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session, redirect, url_for
 from flask_cors import CORS
 from pymongo import MongoClient
 from flask.json.provider import JSONProvider
@@ -33,11 +33,20 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
+app.secret_key = os.getenv('FLASK_SECRET_KEY')
+
 client = MongoClient(os.getenv("MONGO_URI"))
 db = client[os.getenv("MONGO_DB")]
 
 # 한국 시간대 설정
 KST = timezone(timedelta(hours=9))
+
+# GIT 정보
+GITHUB_AUTH_BASE_URL = os.getenv('GITHUB_AUTH_BASE_URL')
+GITHUB_CLIENT_ID = os.getenv('GITHUB_CLIENT_ID')
+GITHUB_CLIENT_SECRET = os.getenv('GITHUB_CLIENT_SECRET')
+GITHUB_USER_API = os.getenv('GITHUB_USER_API')
+GITHUB_TOKEN_URL = os.getenv('GITHUB_TOKEN_URL')
 
 
 class CustomJSONEncoder(json.JSONEncoder):
@@ -132,9 +141,100 @@ def validate_request(required_fields, optional_fields=None):
     return decorator
 
 @app.route('/')
-def render_index():
-    return "connected"
+def index():
+    user = session.get('user')
+    if user:
+        user_json = json.dumps(user, indent=2, ensure_ascii=False)
+        html = f"현재 로그인된 사용자 정보:<pre>{user_json}</pre>"
+        return html
+    return '<a href="/login">Login with GitHub</a>'
 
+"""
+    @API: GET /login
+    @Description: 깃허브 OAuth 인증 페이지로 리다이렉트
+
+    @Response:
+        성공 (200):
+            - 깃허브 OAuth 인증 페이지로 리다이렉트
+"""
+@app.route('/login')
+def login():
+    return redirect(f'{GITHUB_AUTH_BASE_URL}?client_id={GITHUB_CLIENT_ID}&scope=read:org')
+
+
+"""
+    @API: GET /auth/login
+    @Description: 깃허브 인증 후 콜백 처리 및 세션에 사용자 정보 저장
+
+    @Response:
+        - 성공 (200):
+            - 세션에 사용자 정보 저장
+            - 메인 페이지로 리다이렉트
+"""
+@app.route('/auth/login')
+def callback():
+    code = request.args.get('code')
+    token_res = requests.post(
+        GITHUB_TOKEN_URL,
+        headers={'Accept': 'application/json'},
+        data={
+            'client_id': GITHUB_CLIENT_ID,
+            'client_secret': GITHUB_CLIENT_SECRET,
+            'code': code
+        }
+    )
+    token_json = token_res.json()
+    access_token = token_json.get('access_token')
+    user_res = requests.get(
+        GITHUB_USER_API,
+        headers={'Authorization': f'token {access_token}'}
+    )
+    session['user'] = user_res.json()
+    return redirect(url_for('index'))
+
+
+"""
+    @API: GET /logout
+    @Description: 세션 초기화
+
+    @Response:
+        - 성공 (200):
+            - 세션 초기화
+            - 메인 페이지로 리다이렉트
+"""
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('index'))
+
+
+
+
+"""
+@API: POST /api/logs
+@Description: 정글의 TIL(Today I Learned) 로그를 생성하는 API
+
+@Request Body:
+    - name(string): 정글 이름
+    - url(string): TIL 게시글 URL
+
+@Validation:
+    - name: 정글 명단에 있는 이름만 허용
+    - url: 유효한 URL 형식 필요
+
+@Response:
+    성공 (200):
+        - inserted_id: 생성된 문서의 ObjectId
+    실패 (400):
+        - 멤버가 아닌 경우
+    실패 (404): 
+        - 서버 에러 발생 시
+
+@Features:
+    - URL의 메타 정보 자동 추출
+    - 생성 시간 자동 기록
+    - Soft Delete 지원 (trash 필드)
+"""
 @app.route('/api/logs', methods=['POST'])
 @validate_request({'name': str, 'url': str})
 def insert_til(data):
@@ -167,6 +267,27 @@ def insert_til(data):
     except Exception as e:
         return api_response(message='Log 남기기에 실패했습니다.', status=404)
 
+
+"""
+@API: GET /api/logs
+@Description: 정글의 TIL(Today I Learned) 로그를 조회하는 API
+
+@Request Body:
+    - page(int): 페이지 번호
+
+@Validation:
+    - page: 페이지 번호
+
+@Response:
+    성공 (200):
+        - logs: 로그 목록
+        - finished: 마지막 페이지 여부
+    실패 (404): 
+        - 서버 에러 발생 시
+
+@Features:
+    - 페이지당 10개씩 조회
+"""
 @app.route('/api/logs')
 def list_til():
     try:
