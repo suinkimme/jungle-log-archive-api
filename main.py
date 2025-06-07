@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 import os
 import subprocess
 import sys
+import re
 
 # 패키지 자동 설치
 def install_requirements():
@@ -140,6 +141,104 @@ def validate_request(required_fields, optional_fields=None):
 
     return decorator
 
+# 멤버 검증
+def is_valid_jungler(name):
+    junglers = [
+        '고민지', '김기래', '김동규', '김민규', '김보아', '김성종', '김수민', '김현호',
+        '류승찬', '박수연', '박혜린', '배상화', '송상록', '신예린', '신우진', '안수연',
+        '안준표', '안태주', '양진성', '오준탁', '유호준', '이종호', '이주명', '이주형',
+        '이지윤', '이태윤', '장준영', '조성진', '최선하', '한진우', '홍석표', '황희구'
+    ]
+    return name in junglers
+
+
+# 사이트 구별
+def get_site_info(url):
+    
+    if not url:
+        return {"status": "error", "message": "URL이 없습니다."}
+
+    try:
+        response = requests.get(url)
+        content = response.text
+
+        # Tistory 블로그 확인
+        if '"TOP_SSL_URL":"https://www.tistory.com"' in content:
+
+            # script 태그에서 window.T.config 설정 찾기
+            config_match = re.search(r'window\.T\.config\s*=\s*({[^;]+});', content)
+            
+            if config_match:
+                config_str = config_match.group(1)
+                # JSON으로 파싱
+                config = json.loads(config_str)
+                name = config['BLOG']['name']
+                id = config['BLOG']['id']
+                p_url = f'https://{name}.tistory.com/m/api/entry/0/POST?page=#page&size=20'
+                p_page = 0
+                posts = []
+                return {"status": "success", "message": "블로그 조회에 성공 하였습니다.", "type": "tistory", "name": name, "id": id, "p_url": p_url, "p_page": p_page, "posts": posts}
+            return {"status": "error", "message": "블로그 조회에 실패했습니다."}
+        elif 'velog.io/@' in url:
+            # velog 아이디 추출
+            velog_pattern = r'https://velog\.io/(@[^/]+)'
+            velog_match = re.search(velog_pattern, url)
+            id = velog_match.group(1)[1:]
+            name = id
+            p_url = "{\"query\":\"\\n    query velogPosts($input: GetPostsInput!) {\\n  posts(input: $input) {\\n    id\\n    title\\n    short_description\\n    thumbnail\\n    user {\\n      id\\n      username\\n      profile {\\n        id\\n        thumbnail\\n        display_name\\n      }\\n    }\\n    url_slug\\n    released_at\\n    updated_at\\n    comments_count\\n    tags\\n    is_private\\n    likes\\n  }\\n}\\n    \",\"variables\":{\"input\":{\"cursor\":\"#cursor\",\"username\":\"#id\",\"limit\":100,\"tag\":\"\"}}}"
+            p_page = ""
+            posts = []
+            if id:
+                return {"status": "success", "message": "블로그 조회에 성공 하였습니다.", "type": "velog", "name":name, "id": id, "p_url": p_url, "p_page": p_page, "posts": posts}
+            return {"status": "success", "message": "블로그 조회에 성공 하였습니다.", "type": "velog"}
+        return {"status": "error", "message": "블로그 조회에 실패했습니다."}
+    except:
+        return {"status": "error", "message": "블로그 조회에 실패했습니다."}
+
+# 사이트 정보 가져오기
+def get_posts(site_info):
+    if site_info['type'] == 'tistory':
+        page = site_info['p_page']
+        p_url = site_info['p_url'].replace('#page', str(page))
+        response = requests.get(p_url).json()
+        for row in response["data"]['items']:
+            item = {
+                "id": row['id'],
+                "title": row['title'],
+                "url": row['url']+row['subPath'],
+                "created_at": datetime.strptime(row['published'], '%Y. %m. %d.').strftime('%Y-%m-%d'),
+                "thumbnail": row['thumbnail'],
+                "summary": row['summary']
+            }
+            site_info['posts'].append(item)
+        if response['data']['nextPage'] != None:
+            site_info['p_page'] = page + 1
+            return get_posts(site_info)
+    elif site_info['type'] == 'velog':
+        payload = site_info['p_url'].replace('#cursor', site_info['p_page']).replace('#id', site_info['id'])
+        headers = {'content-type': 'application/json'}
+
+        response = requests.request("POST", "https://v3.velog.io/graphql", headers=headers, data=payload).json()
+        
+        for row in response['data']['posts']:
+            item = {
+                "id": row['id'],
+                "title": row['title'],
+                "url": f"https://velog.io/@{site_info['id']}/{row['url_slug']}",
+                "created_at": row['released_at'],
+                "thumbnail": row['thumbnail'],
+                "summary": row['short_description']
+            }
+            site_info['p_page'] = row['id']
+            site_info['posts'].append(item)
+            
+        if response['data']['posts'] != []:
+            return get_posts(site_info)
+        
+    return site_info
+
+
+
 @app.route('/')
 def index():
     user = session.get('user')
@@ -242,14 +341,7 @@ def insert_til(data):
         name = data.get('name')
         url = data.get('url')
 
-        junglers = [
-            '고민지', '김기래', '김동규', '김민규', '김보아', '김성종', '김수민', '김현호',
-            '류승찬', '박수연', '박혜린', '배상화', '송상록', '신예린', '신우진', '안수연',
-            '안준표', '안태주', '양진성', '오준탁', '유호준', '이종호', '이주명', '이주형',
-            '이지윤', '이태윤', '장준영', '조성진', '최선하', '한진우', '홍석표', '황희구'
-        ]
-
-        if name not in junglers:
+        if not is_valid_jungler(name):
             return api_response(message='멤버가 아닙니다.', status=400)
 
         # 메타 태그 정보 추출
@@ -327,5 +419,55 @@ def list_til():
         return api_response(message='TIL 목록 조회에 실패했습니다.', status=404)
 
 
+"""
+@API: GET /api/logs
+@Description: 정글의 TIL(Today I Learned) 로그를 조회하는 API
+
+@Request Body:
+    - name(string): 정글 이름
+    - url(string): 블로그 주소
+
+@Validation:
+    - name: 정글 명단에 있는 이름만 허용
+    - url: 유효한 URL 형식 필요
+
+@Response:
+    성공 (200):
+        - 블로그 타입
+        - 블로그 이름
+        - 블로그 아이디
+        - 블로그 포스트 주소
+    실패 (404): 
+        - 서버 에러 발생 시
+
+@Features:
+    - 블로그 타입에 따라 포스트 조회
+"""
+@app.route('/api/posts', methods=['POST'])
+@validate_request({'name': str, 'url': str})
+def posts(data):
+    try:
+        name = data.get('name')
+        url = data.get('url')
+
+        site_info = get_site_info(url)
+
+        if site_info == None or site_info['status'] == 'error':
+            return api_response(message='사이트 타입을 찾을 수 없습니다.', status=400)
+        
+        site_posts = get_posts(site_info)
+        result = site_posts['posts']
+        
+
+        if not is_valid_jungler(name):
+            return api_response(message='멤버가 아닙니다.', status=400)
+        
+        return api_response(result, status=200)
+    except Exception as e:
+        print(e)
+        return api_response(message='TIL 목록 조회에 실패했습니다.', status=404)
+
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', debug=True, port=5000)
